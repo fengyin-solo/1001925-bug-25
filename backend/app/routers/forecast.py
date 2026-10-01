@@ -20,14 +20,48 @@ STATUSES = ["待生成", "已生成", "偏差超标", "已复核"]
 def list_entries(
     keyword: str | None = Query(default=None, description="按预测单号检索"),
     status: str | None = Query(default=None, description="待生成、已生成、偏差超标、已复核"),
+    station: str | None = Query(default=None, description="按所属场站模糊检索"),
+    start_date: str | None = Query(default=None, description="预测日期起（含），YYYY-MM-DD"),
+    end_date: str | None = Query(default=None, description="预测日期止（含），YYYY-MM-DD"),
     page: int = 1,
     size: int = 20,
 ) -> PageResult[dict]:
-    """按预测单号与状态过滤功率预测列表；没有数据时返回空页，不报错。"""
+    """按预测单号、状态、场站与预测日期范围过滤功率预测列表；没有数据时返回空页，不报错。"""
     if size > 200:
         raise HTTPException(status_code=400, detail="每页最多 200 条，请缩小分页范围")
-    items, total = service.list_entries(keyword=keyword, status=status, page=page, size=size)
+    items, total = service.list_entries(
+        keyword=keyword,
+        status=status,
+        station=station,
+        start_date=start_date,
+        end_date=end_date,
+        page=page,
+        size=size,
+    )
     return PageResult(items=items, total=total, page=page, size=size)
+
+
+# 注意：必须排在 /{entry_id} 之前，否则 /export 会被当成 entry_id 匹配而报参数错误。
+@router.get("/export")
+def export_entries(
+    keyword: str | None = Query(default=None, description="按预测单号检索"),
+    status: str | None = Query(default=None, description="待生成、已生成、偏差超标、已复核"),
+    station: str | None = Query(default=None, description="按所属场站模糊检索"),
+    start_date: str | None = Query(default=None, description="预测日期起（含），YYYY-MM-DD"),
+    end_date: str | None = Query(default=None, description="预测日期止（含），YYYY-MM-DD"),
+) -> dict[str, Any]:
+    """按列表当前条件（单号、状态、场站、预测日期范围）导出待处理预测单。
+
+    已复核的记录不导出，同一预测单号只保留一条；接口只读，不会改变列表里的记录。
+    """
+    items = service.export_entries(
+        keyword=keyword,
+        status=status,
+        station=station,
+        start_date=start_date,
+        end_date=end_date,
+    )
+    return {"module": "forecast", "total": len(items), "fields": LIST_FIELDS, "items": items}
 
 
 @router.get("/{entry_id}", response_model=dict)
@@ -56,10 +90,3 @@ def run_action(entry_id: int, payload: EntryPayload) -> ActionResult:
     if entry is None:
         return ActionResult(ok=False, message=message)
     return ActionResult(ok=True, message=message, entry=entry)
-
-
-@router.get("/export")
-def export_entries() -> dict[str, Any]:
-    """导出功率预测清单：返回当前过滤条件下的全量数据。"""
-    items, total = service.list_entries(page=1, size=10000)
-    return {"module": "forecast", "total": total, "items": items}

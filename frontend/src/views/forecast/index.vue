@@ -7,7 +7,9 @@
       </div>
       <div class="page-actions">
         <button class="btn primary" type="button" @click="openCreate">登记功率预测单</button>
-        <button class="btn" type="button" @click="exportRows">导出功率预测清单</button>
+        <button class="btn" type="button" :disabled="exporting" @click="exportRows">
+          {{ exporting ? '正在导出…' : '导出功率预测清单' }}
+        </button>
       </div>
     </header>
 
@@ -19,9 +21,28 @@
     </div>
 
     <form class="filter-bar" @submit.prevent="reload">
-      <label v-for="field in filterFields" :key="field" class="filter-item">
-        <span>{{ field }}</span>
-        <input v-model="filters[field]" :placeholder="`按${field}检索`" />
+      <label class="filter-item">
+        <span>预测单号</span>
+        <input v-model="filters.keyword" placeholder="按预测单号检索" />
+      </label>
+      <label class="filter-item">
+        <span>所属场站</span>
+        <input v-model="filters.station" placeholder="按所属场站检索" />
+      </label>
+      <label class="filter-item">
+        <span>预测日期起</span>
+        <input v-model="filters.start_date" type="date" />
+      </label>
+      <label class="filter-item">
+        <span>预测日期止</span>
+        <input v-model="filters.end_date" type="date" />
+      </label>
+      <label class="filter-item">
+        <span>预测状态</span>
+        <select v-model="filters.status">
+          <option value="">全部状态</option>
+          <option v-for="item in statuses" :key="item" :value="item">{{ item }}</option>
+        </select>
       </label>
       <button class="btn" type="submit">查询</button>
       <button class="btn ghost" type="button" @click="resetFilters">重置条件</button>
@@ -57,6 +78,7 @@
 
     <footer class="page-foot">
       <span>共 {{ total }} 条功率预测记录</span>
+      <span v-if="noticeMessage" class="success-text">{{ noticeMessage }}</span>
       <span v-if="errorMessage" class="error-text">{{ errorMessage }}</span>
     </footer>
   </section>
@@ -78,16 +100,80 @@ const stats = [{"label": "待生成预测", "value": 0}, {"label": "偏差超标
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
-const filters = ref<Record<string, string>>({})
-const filterFields = columns.slice(0, 3)
+const noticeMessage = ref('')
+const exporting = ref(false)
+const filters = ref<Record<string, string>>({
+  keyword: '',
+  station: '',
+  start_date: '',
+  end_date: '',
+  status: '',
+})
+
+// 列表查询与导出共用同一份条件拼参，保证两边取数口径一致。
+function buildQuery() {
+  const params = new URLSearchParams()
+  for (const [key, value] of Object.entries(filters.value)) {
+    const trimmed = value.trim()
+    if (trimmed) {
+      params.set(key, trimmed)
+    }
+  }
+  return params.toString()
+}
 
 function resetFilters() {
-  filters.value = {}
+  for (const key of Object.keys(filters.value)) {
+    filters.value[key] = ''
+  }
   void reload()
 }
 
-function exportRows() {
-  window.open(`${ENDPOINT}/export`, '_blank')
+async function exportRows() {
+  if (exporting.value) {
+    return
+  }
+  // 导出失败时不清空任何已选条件，用户可直接重试。
+  exporting.value = true
+  errorMessage.value = ''
+  noticeMessage.value = ''
+  try {
+    const query = buildQuery()
+    const response = await request(`${ENDPOINT}/export${query ? `?${query}` : ''}`)
+    if (!response.ok) {
+      throw new Error(`导出请求返回 ${response.status}，已保留当前条件，请重试`)
+    }
+    const payload = (await response.json()) as { total?: number; items?: Row[]; fields?: string[] }
+    downloadCsv(payload)
+    noticeMessage.value = `已导出 ${payload.total ?? payload.items?.length ?? 0} 条待处理预测偏差，列表数据未改动`
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '功率预测清单导出失败，请重试'
+  } finally {
+    exporting.value = false
+  }
+}
+
+function downloadCsv(payload: { items?: Row[]; fields?: string[] }) {
+  const fields = payload.fields ?? columns
+  const items = payload.items ?? []
+  const escapeCell = (value: unknown) => {
+    const text = value === null || value === undefined ? '' : String(value)
+    return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
+  }
+  const lines = [
+    fields.map(escapeCell).join(','),
+    ...items.map((row) => fields.map((field) => escapeCell(row[field] ?? '')).join(',')),
+  ]
+  // ﻿ 便于 Excel 直接按 UTF-8 打开，中文不乱码。
+  const blob = new Blob(['﻿' + lines.join('\r\n')], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `功率预测偏差清单_${new Date().toISOString().slice(0, 10)}.csv`
+  document.body.appendChild(link)
+  link.click()
+  link.remove()
+  URL.revokeObjectURL(url)
 }
 
 function openCreate() {
@@ -96,6 +182,7 @@ function openCreate() {
 
 async function runAction(action: string, row: Row) {
   errorMessage.value = ''
+  noticeMessage.value = ''
   try {
     const response = await request(`${ENDPOINT}/${row.id}/actions`, {
       method: 'POST',
@@ -112,9 +199,10 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  noticeMessage.value = ''
+  const query = buildQuery()
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}${query ? `?${query}` : ''}`)
     if (!response.ok) {
       throw new Error('功率预测单列表读取失败')
     }
