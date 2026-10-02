@@ -7,7 +7,9 @@
       </div>
       <div class="page-actions">
         <button class="btn primary" type="button" @click="openCreate">登记功率预测单</button>
-        <button class="btn" type="button" @click="exportRows">导出功率预测清单</button>
+        <button class="btn" type="button" :disabled="exporting" @click="exportRows">
+          {{ exporting ? '导出中…' : '导出功率预测清单' }}
+        </button>
       </div>
     </header>
 
@@ -78,16 +80,74 @@ const stats = [{"label": "待生成预测", "value": 0}, {"label": "偏差超标
 const rows = ref<Row[]>([])
 const total = ref(0)
 const errorMessage = ref('')
+const exporting = ref(false)
 const filters = ref<Record<string, string>>({})
 const filterFields = columns.slice(0, 3)
+
+// 列表筛选项与后端查询参数的对应关系，列表与导出共用，保证两边是同一批数据。
+const QUERY_KEYS: Record<string, string> = {
+  预测单号: 'keyword',
+  所属场站: 'station',
+  预测日期: 'forecast_date',
+}
+
+function buildQuery() {
+  const params = new URLSearchParams()
+  for (const field of filterFields) {
+    const value = (filters.value[field] ?? '').trim()
+    if (value) {
+      params.append(QUERY_KEYS[field], value)
+    }
+  }
+  return params.toString()
+}
 
 function resetFilters() {
   filters.value = {}
   void reload()
 }
 
-function exportRows() {
-  window.open(`${ENDPOINT}/export`, '_blank')
+async function exportRows() {
+  // 失败时不清空筛选条件，用户可直接重试；导出成功也不刷新列表，记录保持原样。
+  errorMessage.value = ''
+  exporting.value = true
+  try {
+    const query = buildQuery()
+    const response = await request(`${ENDPOINT}/export${query ? `?${query}` : ''}`)
+    if (!response.ok) {
+      throw new Error('功率预测清单导出失败，请稍后重试')
+    }
+    const payload = await response.json()
+    downloadExport(payload.items ?? [])
+  } catch (error) {
+    errorMessage.value = error instanceof Error ? error.message : '功率预测清单导出失败'
+  } finally {
+    exporting.value = false
+  }
+}
+
+function downloadExport(items: Row[]) {
+  const header = columns
+  const lines = [header.join(',')]
+  for (const item of items) {
+    lines.push(header.map((column) => csvCell(item[column])).join(','))
+  }
+  // 加 BOM，避免 Excel 打开中文列名乱码。
+  const blob = new Blob([`﻿${lines.join('\n')}`], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const link = document.createElement('a')
+  link.href = url
+  link.download = `功率预测清单_${new Date().toISOString().slice(0, 10)}.csv`
+  link.click()
+  URL.revokeObjectURL(url)
+}
+
+function csvCell(value: string | number | null | undefined) {
+  if (value === null || value === undefined || value === '') {
+    return ''
+  }
+  const text = String(value)
+  return /[",\n]/.test(text) ? `"${text.replace(/"/g, '""')}"` : text
 }
 
 function openCreate() {
@@ -112,9 +172,9 @@ async function runAction(action: string, row: Row) {
 
 async function reload() {
   errorMessage.value = ''
-  const query = new URLSearchParams(filters.value as Record<string, string>).toString()
+  const query = buildQuery()
   try {
-    const response = await request(`${ENDPOINT}?${query}`)
+    const response = await request(`${ENDPOINT}${query ? `?${query}` : ''}`)
     if (!response.ok) {
       throw new Error('功率预测单列表读取失败')
     }
